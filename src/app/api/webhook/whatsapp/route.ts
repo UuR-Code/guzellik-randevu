@@ -93,7 +93,11 @@ export async function POST(req: NextRequest) {
       },
     ];
 
+    const nowTR = new Date().toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" });
     const systemPrompt = `Sen Belle Studio güzellik salonunun WhatsApp asistanısın. Türkçe konuş. Kısa ve samimi ol. Emoji kullanabilirsin.
+
+Şu anki Türkiye saati: ${nowTR}
+ÖNEMLİ: Tüm tarih/saat bilgilerini Türkiye saati (UTC+3) olarak işle. create_appointment için datetime değerini her zaman "+03:00" offset ile ISO 8601 formatında gönder. Örnek: "2026-06-17T10:30:00+03:00"
 
 Mevcut konuşma durumu: ${conv.state}
 Bağlam: ${JSON.stringify(conv.context)}
