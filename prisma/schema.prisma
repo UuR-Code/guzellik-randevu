@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  createdAt DateTime @default(now())
+}
+
+model Staff {
+  id           String         @id @default(cuid())
+  name         String
+  phone        String?
+  bio          String?
+  color        String         @default("#B08D7A")
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  appointments Appointment[]
+  services     StaffService[]
+  workingHours WorkingHour[]
+}
+
+model Service {
+  id           String         @id @default(cuid())
+  name         String
+  description  String?
+  emoji        String         @default("✨")
+  duration     Int
+  price        Decimal        @db.Decimal(10, 2)
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  appointments Appointment[]
+  staff        StaffService[]
+}
+
+model StaffService {
+  staffId   String
+  serviceId String
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([staffId, serviceId])
+}
+
+model WorkingHour {
+  id      String  @id @default(cuid())
+  staffId String
+  day     String
+  start   String?
+  end     String?
+  dayOff  Boolean @default(false)
+  staff   Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+}
+
+model Appointment {
+  id            String            @id @default(cuid())
+  customerName  String
+  customerPhone String
+  staffId       String
+  serviceId     String
+  datetime      DateTime
+  duration      Int
+  price         Decimal           @db.Decimal(10, 2)
+  status        AppointmentStatus @default(CONFIRMED)
+  notes         String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  staff         Staff             @relation(fields: [staffId], references: [id])
+  service       Service           @relation(fields: [serviceId], references: [id])
+  notifications NotificationLog[]
+  reminders     SentReminder[]
+}
+
+model NotificationLog {
+  id            String      @id @default(cuid())
+  appointmentId String
+  phone         String
+  messageType   String
+  status        String?
+  sentAt        DateTime    @default(now())
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+}
+
+model SentReminder {
+  id            String      @id @default(cuid())
+  appointmentId String
+  type          String
+  sentAt        DateTime    @default(now())
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+
+  @@unique([appointmentId, type])
+}
+
+model WaConversation {
+  id        String   @id @default(cuid())
+  phone     String   @unique
+  state     String   @default("IDLE")
+  context   Json     @default("{}")
+  updatedAt DateTime @updatedAt
+}
+
+enum AppointmentStatus {
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
