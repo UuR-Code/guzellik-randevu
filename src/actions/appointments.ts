@@ -53,10 +53,41 @@ export async function updateAppointmentStatus(id: string, status: AppointmentSta
   const appointment = await prisma.appointment.update({
     where: { id },
     data: { status },
+    include: { staff: true, service: true },
   });
   revalidatePath("/appointments");
   revalidatePath("/");
+
+  if (status === "COMPLETED" || status === "CANCELLED") {
+    const timeStr = new Date(appointment.datetime).toLocaleString("tr-TR", { timeZone: "UTC", day: "2-digit", month: "long", hour: "2-digit", minute: "2-digit" });
+    const emoji = status === "COMPLETED" ? "✅" : "❌";
+    const label = status === "COMPLETED" ? "Tamamlandı" : "İptal edildi";
+    const msg = `${emoji} Randevu ${label}\n👤 ${appointment.customerName}\n💅 ${appointment.service.name}\n🕐 ${timeStr}\n👩 ${appointment.staff.name}`;
+    await sendOwnerWhatsApp(msg).catch((e) => console.error("Owner WA error:", e));
+  }
+
   return appointment;
+}
+
+async function sendOwnerWhatsApp(message: string) {
+  const ownerPhone = process.env.OWNER_PHONE;
+  if (!ownerPhone) return;
+  await fetch(
+    `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: ownerPhone,
+        type: "text",
+        text: { body: message },
+      }),
+    }
+  );
 }
 
 export async function updateAppointment(id: string, data: {

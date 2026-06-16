@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, CalendarDays, Scissors, Users, Settings, Sparkles, Menu, X } from "lucide-react";
+import { LayoutDashboard, CalendarDays, Scissors, Users, Settings, Sparkles, Menu, X, MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState, useEffect } from "react";
 
@@ -11,6 +11,7 @@ const nav = [
   { href: "/appointments", icon: CalendarDays, label: "Randevular" },
   { href: "/services", icon: Scissors, label: "Hizmetler" },
   { href: "/staff", icon: Users, label: "Uzmanlar" },
+  { href: "/whatsapp", icon: MessageCircle, label: "WhatsApp Bot" },
   { href: "/settings", icon: Settings, label: "Ayarlar" },
 ];
 
