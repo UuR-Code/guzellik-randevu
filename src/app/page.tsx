@@ -4,7 +4,7 @@ import { CalendarDays, CheckCircle2, TrendingUp, Clock, Plus } from "lucide-reac
 import Link from "next/link";
 
 function formatTime(dt: Date | string) {
-  return new Date(dt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+  return new Date(dt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
 }
 
 const statusStyle: Record<string, string> = {

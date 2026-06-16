@@ -37,8 +37,8 @@ const statusLabel: Record<AppointmentStatus, string> = {
 function formatDT(dt: Date | string) {
   const d = new Date(dt);
   return {
-    date: d.toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" }),
-    time: d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
+    date: d.toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }),
+    time: d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
   };
 }
 
