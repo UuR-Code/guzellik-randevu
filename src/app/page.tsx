@@ -1,3 +1,4 @@
+export const dynamic = "force-dynamic";
 import { getAppointments } from "@/actions/appointments";
 import { CalendarDays, CheckCircle2, TrendingUp, Clock, Plus } from "lucide-react";
 import Link from "next/link";
