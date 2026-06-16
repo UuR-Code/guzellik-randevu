@@ -108,7 +108,14 @@ Müşteri senden randevu almak istiyorsa:
 3. Müsait saatleri göster (get_available_slots kullan)
 4. İsmini öğren ve randevuyu oluştur (create_appointment kullan)`;
 
+    // Load conversation history (last 10 exchanges)
+    const ctx = (conv.context ?? {}) as Record<string, unknown>;
+    const history: Anthropic.MessageParam[] = Array.isArray(ctx.history)
+      ? (ctx.history as Anthropic.MessageParam[]).slice(-20)
+      : [];
+
     const messages: Anthropic.MessageParam[] = [
+      ...history,
       { role: "user", content: text },
     ];
 
@@ -201,7 +208,7 @@ Müşteri senden randevu almak istiyorsa:
               // Notify salon owner
               await sendWhatsApp(
                 process.env.OWNER_PHONE!,
-                `📅 Yeni randevu!\n👤 ${appt.customerName}\n💅 ${svc.name}\n🕐 ${new Date(appt.datetime).toLocaleString("tr-TR")}\n👩 ${appt.staff.name}`
+                `📅 Yeni randevu!\n👤 ${appt.customerName}\n💅 ${svc.name}\n🕐 ${new Date(appt.datetime).toLocaleString("tr-TR", { timeZone: "UTC" })}\n👩 ${appt.staff.name}`
               );
               result = `Randevu oluşturuldu: ${appt.id}`;
             }
@@ -218,9 +225,17 @@ Müşteri senden randevu almak istiyorsa:
 
     if (reply) {
       await sendWhatsApp(phone, reply);
+
+      // Save history (only text exchanges, max 20 items)
+      const newHistory: Anthropic.MessageParam[] = [
+        ...history,
+        { role: "user", content: text },
+        { role: "assistant", content: reply },
+      ].slice(-20);
+
       await prisma.waConversation.update({
         where: { phone },
-        data: { state: "ACTIVE", context: { lastMsgId: msgId, lastMessage: text, lastReply: reply } },
+        data: { state: "ACTIVE", context: { lastMsgId: msgId, history: newHistory } },
       });
     }
   } catch (err) {
