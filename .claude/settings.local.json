@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --yes)",
+      "Bash(Remove-Item \"E:\\\\guzellik-randevu\\\\guzellik-salonu-dashboard-plan.md\" -Force)",
+      "Bash(mv \"E:/guzellik-randevu/guzellik-salonu-dashboard-plan.md\" /tmp/ && npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --yes 2>&1 | tail -5)",
+      "Bash(npx shadcn@latest init -d)",
+      "Bash(npx shadcn@latest add button card badge table dialog select tabs separator avatar)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(taskkill /PID 26440 /F)",
+      "Bash(taskkill /PID 3620 /F)",
+      "PowerShell(Stop-Process -Id 26440 -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(Stop-Process -Id 3620 -Force -ErrorAction SilentlyContinue)"
+    ]
+  }
+}
