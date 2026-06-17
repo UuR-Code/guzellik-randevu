@@ -67,12 +67,13 @@ export async function POST(req: NextRequest) {
       },
       {
         name: "get_available_slots",
-        description: "Uzmanın müsait saatlerini getir (sonraki 3 gün)",
+        description: "Uzmanın müsait saatlerini getir. date parametresi verilirse o güne ait slotları döner, verilmezse sonraki 7 günü tarar.",
         input_schema: {
           type: "object" as const,
           properties: {
             staff_id: { type: "string" },
             service_id: { type: "string" },
+            date: { type: "string", description: "ISO 8601 tarih (ör: 2026-06-20). Opsiyonel." },
           },
           required: ["staff_id", "service_id"],
         },
@@ -188,26 +189,34 @@ Mevcut konuşma durumu: ${conv.state}`;
             else {
               const slots: string[] = [];
               const now = new Date();
-              for (let d = 1; d <= 3; d++) {
-                const date = new Date(now);
-                date.setDate(date.getDate() + d);
-                const dayName = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"][date.getDay()];
+              const specificDate = input.date ? new Date(input.date) : null;
+              const daysToCheck = specificDate ? 1 : 7;
+
+              for (let d = 0; d < (specificDate ? 1 : 7); d++) {
+                let checkDate: Date;
+                if (specificDate) {
+                  checkDate = new Date(specificDate);
+                } else {
+                  checkDate = new Date(now);
+                  checkDate.setDate(checkDate.getDate() + d + 1);
+                }
+                const dayName = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"][checkDate.getDay()];
                 const wh = st.workingHours.find((h) => h.day === dayName);
                 if (!wh || wh.dayOff || !wh.start) continue;
                 const [sh, sm] = wh.start.split(":").map(Number);
                 const [eh, em] = (wh.end || "18:00").split(":").map(Number);
                 let cur = sh * 60 + sm;
                 const endMin = eh * 60 + em;
+                const dateStr = checkDate.toLocaleDateString("tr-TR", { day: "2-digit", month: "long", timeZone: "UTC" });
                 while (cur + svc.duration <= endMin) {
                   const h = String(Math.floor(cur / 60)).padStart(2, "0");
                   const m = String(cur % 60).padStart(2, "0");
-                  const dateStr = date.toLocaleDateString("tr-TR", { day: "2-digit", month: "long" });
                   slots.push(`${dateStr} ${h}:${m}`);
                   cur += 30;
-                  if (slots.length >= 6) break;
+                  if (slots.length >= 8) break;
                 }
-                if (slots.length >= 6) break;
               }
+              void daysToCheck;
               result = slots.length > 0 ? slots.join("\n") : "Müsait slot bulunamadı";
             }
           } else if (toolUse.name === "create_appointment") {
