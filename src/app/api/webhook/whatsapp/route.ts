@@ -238,6 +238,9 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    if (!reply) {
+      reply = "Bir sorun oluştu, lütfen tekrar yazar mısınız?";
+    }
     await sendWhatsApp(phone, reply);
     await prisma.waConversation.update({
       where: { phone },
