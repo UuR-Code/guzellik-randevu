@@ -113,6 +113,8 @@ RANDEVU AKIŞI (sırasıyla, bu sırayı bozma):
 3. Tarih/saat öğren → get_available_slots çağır (staff_id + service_id ile)
 4. İsim al → create_appointment çağır
 
+KESİN KURAL: Randevu onayı vermeden önce create_appointment tool'unu MUTLAKA çağırmalısın. Tool çağırmadan "randevun oluşturuldu" veya "randevun hazır" YAZMA. create_appointment sonucunda gelen ID'yi onay mesajında göster.
+
 TARİH/SAAT: Tüm datetime değerlerini "+03:00" offset ile ISO 8601 formatında gönder. Örnek: "2026-06-20T14:00:00+03:00"
 
 Mevcut konuşma durumu: ${conv.state}`;
