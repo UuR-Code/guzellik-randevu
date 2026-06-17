@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
           state = "ASK_SERVICE";
           newCtx = { customerName: newCtx.customerName, lastMsgId: msgId };
         } else {
-          reply = await llmFreeReply(text, newCtx.customerName, "Belle Studio güzellik salonunun WhatsApp asistanısın. Kısa ve samimi cevap ver. Randevu dışı konularda yardım edemeyeceğini nazikçe belirt, randevu almaya yönlendir.");
+          reply = await llmFreeReply(text, newCtx.customerName, "Sen Belle Studio güzellik salonunun WhatsApp asistanısın. Salon adı kesinlikle 'Belle Studio'dur, başka isim kullanma. Kısa ve samimi cevap ver. Randevu dışı konularda yardım edemeyeceğini nazikçe belirt, randevu almaya yönlendir.");
         }
         break;
       }
@@ -190,9 +190,9 @@ export async function POST(req: NextRequest) {
 
       case "CONFIRM": {
         const svc = services.find(s => s.id === newCtx.serviceId)!;
-        const decision = await llmExtract(
-          `Kullanıcı: "${text}"\nRandevu onaylamak için "evet", iptal için "hayır", değişiklik için ne değiştirmek istediğini ("isim", "tarih", "uzman", "hizmet") yaz.`
-        );
+        const decision = (await llmExtract(
+          `Kullanıcı: "${text}"\nAşağıdakilerden birini yaz:\n- "evet" → randevuyu onaylıyor\n- "hayır" → iptal ediyor\n- "tarih" → saat veya gün değiştirmek istiyor veya başka saatler soruyor\n- "uzman" → uzman değiştirmek istiyor\n- "isim" → isim değiştirmek istiyor\n- "hizmet" → hizmet değiştirmek istiyor\nSadece tek kelime yaz.`
+        ) ?? "").toLowerCase().trim();
 
         if (decision === "evet" || decision === "yes") {
           const appt = await prisma.appointment.create({
@@ -221,8 +221,19 @@ export async function POST(req: NextRequest) {
           reply = "Adınızı güncelleyelim, yeni adınız nedir?";
           state = "ASK_NAME";
         } else if (decision === "tarih") {
-          reply = "Hangi gün ve saat uygun?";
-          state = "ASK_DATETIME";
+          // If we already have a date, show slots for that date first
+          const st = staffList.find(s => s.id === newCtx.staffId)!;
+          const existingDate = newCtx.datetime ? newCtx.datetime.slice(0, 10) : null;
+          const slots = existingDate ? getSlots(st, svc, existingDate) : [];
+          if (slots.length > 0) {
+            newCtx.pendingDate = existingDate!;
+            const dateLabel = new Date(existingDate! + "T00:00:00Z").toLocaleDateString("tr-TR", { day: "numeric", month: "long", weekday: "long", timeZone: "UTC" });
+            reply = `${dateLabel} için müsait saatler:\n\n${slots.map(s => `⏰ ${s.label}`).join("\n")}\n\nHangi saat uygun? (Farklı gün için gün belirtin)`;
+            state = "ASK_SLOT";
+          } else {
+            reply = "Hangi gün ve saat uygun?";
+            state = "ASK_DATETIME";
+          }
         } else if (decision === "uzman") {
           const eligibleStaff = svc.staff.map(ss => ss.staff);
           reply = `Uzmanlarımız:\n\n${eligibleStaff.map(s => `👩 *${s.name}*`).join("\n")}\n\nHangisini tercih edersiniz?`;
