@@ -4,7 +4,20 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// GET — Meta webhook doğrulama
+type ConvState = "IDLE" | "ASK_SERVICE" | "ASK_STAFF" | "ASK_DATETIME" | "ASK_SLOT" | "ASK_NAME" | "CONFIRM";
+
+type BookingCtx = {
+  customerName?: string;
+  serviceId?: string;
+  serviceName?: string;
+  staffId?: string;
+  staffName?: string;
+  datetime?: string;
+  pendingDate?: string;
+  lastMsgId?: string;
+};
+
+// GET — Meta webhook verification
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const mode = searchParams.get("hub.mode");
@@ -16,10 +29,9 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 }
 
-// POST — Gelen mesajları işle
+// POST — Incoming messages
 export async function POST(req: NextRequest) {
   const body = await req.json();
-
   try {
     const entry = body?.entry?.[0]?.changes?.[0]?.value;
     const message = entry?.messages?.[0];
@@ -29,253 +41,279 @@ export async function POST(req: NextRequest) {
     const text = message.text.body.trim();
     const msgId = message.id;
 
-    // Duplicate check via conversation context
-    const convCheck = await prisma.waConversation.findUnique({ where: { phone } });
-    if ((convCheck?.context as Record<string, string>)?.lastMsgId === msgId) {
-      return NextResponse.json({ ok: true });
-    }
-
-    // Get or create conversation
     let conv = await prisma.waConversation.findUnique({ where: { phone } });
+    const ctx = ((conv?.context ?? {}) as BookingCtx);
+    if (ctx.lastMsgId === msgId) return NextResponse.json({ ok: true });
+
     if (!conv) {
-      conv = await prisma.waConversation.create({
-        data: { phone, state: "IDLE", context: {} },
-      });
+      conv = await prisma.waConversation.create({ data: { phone, state: "IDLE", context: {} } });
     }
 
-    // Load data for AI tools
-    const [services, staff] = await Promise.all([
+    const [services, staffList] = await Promise.all([
       prisma.service.findMany({ where: { isActive: true }, include: { staff: { include: { staff: true } } } }),
       prisma.staff.findMany({ where: { isActive: true }, include: { workingHours: true } }),
     ]);
 
-    // Claude tool-use
-    const tools: Anthropic.Tool[] = [
-      {
-        name: "get_services",
-        description: "Aktif hizmetlerin listesini döndür",
-        input_schema: { type: "object" as const, properties: {}, required: [] },
-      },
-      {
-        name: "get_available_staff",
-        description: "Belirli bir hizmeti yapabilen uzmanları listele",
-        input_schema: {
-          type: "object" as const,
-          properties: { service_id: { type: "string", description: "Hizmet ID'si" } },
-          required: ["service_id"],
-        },
-      },
-      {
-        name: "get_available_slots",
-        description: "Uzmanın müsait saatlerini getir. date parametresi verilirse o güne ait slotları döner, verilmezse sonraki 7 günü tarar.",
-        input_schema: {
-          type: "object" as const,
-          properties: {
-            staff_id: { type: "string" },
-            service_id: { type: "string" },
-            date: { type: "string", description: "ISO 8601 tarih (ör: 2026-06-20). Opsiyonel." },
-          },
-          required: ["staff_id", "service_id"],
-        },
-      },
-      {
-        name: "create_appointment",
-        description: "Randevu oluştur",
-        input_schema: {
-          type: "object" as const,
-          properties: {
-            customer_name: { type: "string" },
-            staff_id: { type: "string" },
-            service_id: { type: "string" },
-            datetime: { type: "string", description: "ISO 8601 format" },
-          },
-          required: ["customer_name", "staff_id", "service_id", "datetime"],
-        },
-      },
-    ];
-
-    const nowTR = new Date().toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" });
-    const systemPrompt = `Sen Belle Studio güzellik salonunun WhatsApp asistanısın. Türkçe konuş. Kısa ve samimi ol. Emoji kullanabilirsin.
-
-Şu anki Türkiye saati: ${nowTR}
-
-MUTLAK KURALLAR (asla ihlal etme):
-- Salon telefonu: 0554 464 70 61. Başka numara YAZMA, uydurma.
-- Uzman veya hizmet adı UYDURMAYACAKSIN. Sadece tool'dan gelen sonuçları kullan.
-- Her zaman önce get_services çağır, servis ID'sini asla tahmin etme.
-- get_available_staff sonucu boş gelirse: "Bu hizmet için şu an uygun uzmanımız yok, lütfen 0554 464 70 61'i ara." de.
-- get_available_slots sonucu boş gelirse: "Bu tarihte uygun saat yok, başka bir gün deneyelim mi?" de ve başka gün sor.
-- Müşteri "farketmez", "sen seç" derse ilk gelen uzmanı/saati seç ve devam et — pes etme.
-- Randevu akışı bitmeden asla "telefon et" veya "salona gel" deme.
-
-RANDEVU AKIŞI (sırasıyla, bu sırayı bozma):
-1. get_services çağır → hizmet listesini göster, müşteriden seçmesini iste
-2. get_available_staff çağır (service_id ile) → uzman listesini göster
-3. Tarih/saat öğren → get_available_slots çağır (staff_id + service_id ile)
-4. İsim al → create_appointment çağır
-
-KESİN KURAL: Randevu onayı vermeden önce create_appointment tool'unu MUTLAKA çağırmalısın. Tool çağırmadan "randevun oluşturuldu" veya "randevun hazır" YAZMA. create_appointment sonucunda gelen ID'yi onay mesajında göster.
-
-TARİH/SAAT: Tüm datetime değerlerini "+03:00" offset ile ISO 8601 formatında gönder. Örnek: "2026-06-20T14:00:00+03:00"
-
-Mevcut konuşma durumu: ${conv.state}`;
-
-    // Load conversation history (last 10 exchanges)
-    const ctx = (conv.context ?? {}) as Record<string, unknown>;
-    const history: Anthropic.MessageParam[] = Array.isArray(ctx.history)
-      ? (ctx.history as Anthropic.MessageParam[]).slice(-20)
-      : [];
-
-    const messages: Anthropic.MessageParam[] = [
-      ...history,
-      { role: "user", content: text },
-    ];
-
+    let state = conv.state as ConvState;
+    let newCtx: BookingCtx = { ...ctx, lastMsgId: msgId };
     let reply = "";
-    let continueLoop = true;
-    let appointmentCreated = false;
 
-    while (continueLoop) {
-      const response = await client.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1024,
-        system: systemPrompt,
-        tools,
-        messages,
-      });
+    switch (state) {
+      case "IDLE": {
+        const wantsBook = await llmYesNo(
+          `Kullanıcı mesajı: "${text}"\nBu kişi randevu almak istiyor mu? Sadece "evet" veya "hayır" yaz.`
+        );
+        if (wantsBook) {
+          reply = buildServiceList(services, newCtx.customerName);
+          state = "ASK_SERVICE";
+          newCtx = { customerName: newCtx.customerName, lastMsgId: msgId };
+        } else {
+          reply = await llmFreeReply(text, newCtx.customerName, "Belle Studio güzellik salonunun WhatsApp asistanısın. Kısa ve samimi cevap ver. Randevu dışı konularda yardım edemeyeceğini nazikçe belirt, randevu almaya yönlendir.");
+        }
+        break;
+      }
 
-      if (response.stop_reason === "end_turn") {
-        const candidateReply = response.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("\n");
+      case "ASK_SERVICE": {
+        const serviceNames = services.map(s => `${s.name} (id:${s.id})`).join(", ");
+        const picked = await llmExtract(
+          `Hizmetler: ${serviceNames}\nKullanıcı: "${text}"\nHangi hizmetin id'sini seçti? Sadece id yaz, hiçbiri değilse "null" yaz.`
+        );
+        const svc = services.find(s => s.id === picked);
+        if (!svc) {
+          reply = `Hangi hizmeti almak istersiniz? Lütfen aşağıdan seçin:\n\n${services.map(s => `${s.emoji} *${s.name}* — ${s.price}₺`).join("\n")}`;
+        } else {
+          newCtx.serviceId = svc.id;
+          newCtx.serviceName = svc.name;
+          const eligibleStaff = svc.staff.map(ss => ss.staff);
+          if (eligibleStaff.length === 1) {
+            newCtx.staffId = eligibleStaff[0].id;
+            newCtx.staffName = eligibleStaff[0].name;
+            reply = `${svc.emoji} *${svc.name}* seçildi! Uzmanınız: *${eligibleStaff[0].name}*\n\nHangi gün ve saat uygun? (ör: "yarın 14:00", "cuma öğleden sonra")`;
+            state = "ASK_DATETIME";
+          } else {
+            reply = `${svc.emoji} *${svc.name}* için uzmanlarımız:\n\n${eligibleStaff.map(s => `👩 *${s.name}*`).join("\n")}\n\nHangisini tercih edersiniz?`;
+            state = "ASK_STAFF";
+          }
+        }
+        break;
+      }
 
-        // If Claude is confirming a booking without having called create_appointment, force the tool call
-        const looksLikeConfirmation = /randev|oluştur|ayarland|kaydedil|hazır|onaylandı/i.test(candidateReply);
-        if (looksLikeConfirmation && !appointmentCreated) {
-          messages.push({ role: "assistant", content: candidateReply });
-          messages.push({ role: "user", content: "create_appointment tool'unu çağırarak randevuyu sisteme kaydet. Tool çağırmadan randevu oluşturulmuş sayılmaz." });
-          continue;
+      case "ASK_STAFF": {
+        const svc = services.find(s => s.id === newCtx.serviceId)!;
+        const eligibleStaff = svc.staff.map(ss => ss.staff);
+        const staffNames = eligibleStaff.map(s => `${s.name} (id:${s.id})`).join(", ");
+        const picked = await llmExtract(
+          `Uzmanlar: ${staffNames}\nKullanıcı: "${text}"\nHangi uzmanın id'sini seçti veya "farketmez" mi dedi? Id veya "any" yaz.`
+        );
+        const st = eligibleStaff.find(s => s.id === picked) ?? eligibleStaff[0];
+        newCtx.staffId = st.id;
+        newCtx.staffName = st.name;
+        reply = `👩 *${st.name}* seçildi!\n\nHangi gün ve saat uygun?`;
+        state = "ASK_DATETIME";
+        break;
+      }
+
+      case "ASK_DATETIME": {
+        const nowTR = new Date().toLocaleDateString("tr-TR", { timeZone: "Europe/Istanbul", weekday: "long", day: "numeric", month: "long", year: "numeric" });
+        const dateResult = await llmExtract(
+          `Bugün: ${nowTR}\nKullanıcı: "${text}"\nTarih ve saati ISO 8601 +03:00 formatında çıkar. Sadece şu formatı döndür: "2026-06-20T14:00:00+03:00" veya sadece tarihi "2026-06-20" veya "null".`
+        );
+        if (!dateResult || dateResult === "null") {
+          reply = "Hangi gün ve saat uygun? (ör: \"yarın 14:00\", \"cuma 15:30\", \"20 haziran öğleden sonra\")";
+          break;
         }
 
-        reply = candidateReply;
-        continueLoop = false;
-      } else if (response.stop_reason === "tool_use") {
-        const toolUseBlocks = response.content.filter(
-          (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
+        const st = staffList.find(s => s.id === newCtx.staffId)!;
+        const svc = services.find(s => s.id === newCtx.serviceId)!;
+
+        if (dateResult.includes("T")) {
+          // Full datetime given
+          newCtx.datetime = dateResult;
+          if (newCtx.customerName) {
+            reply = buildConfirmMsg(newCtx, svc);
+            state = "CONFIRM";
+          } else {
+            reply = "Harika! 😊 Adınızı öğrenebilir miyim?";
+            state = "ASK_NAME";
+          }
+        } else {
+          // Only date given, show slots
+          const slots = getSlots(st, svc, dateResult);
+          if (slots.length === 0) {
+            const dateLabel = new Date(dateResult).toLocaleDateString("tr-TR", { day: "numeric", month: "long", weekday: "long", timeZone: "UTC" });
+            reply = `${dateLabel} günü *${st.name}* müsait değil. Başka bir gün tercih eder misiniz?`;
+          } else {
+            newCtx.pendingDate = dateResult;
+            const dateLabel = new Date(dateResult).toLocaleDateString("tr-TR", { day: "numeric", month: "long", weekday: "long", timeZone: "UTC" });
+            reply = `${dateLabel} için *${st.name}*'nın müsait saatleri:\n\n${slots.map(s => `⏰ ${s.label}`).join("\n")}\n\nHangi saat uygun?`;
+            state = "ASK_SLOT";
+          }
+        }
+        break;
+      }
+
+      case "ASK_SLOT": {
+        const st = staffList.find(s => s.id === newCtx.staffId)!;
+        const svc = services.find(s => s.id === newCtx.serviceId)!;
+        const slots = getSlots(st, svc, newCtx.pendingDate!);
+        const slotLabels = slots.map(s => `${s.label} (iso:${s.iso})`).join(", ");
+        const picked = await llmExtract(
+          `Müsait slotlar: ${slotLabels}\nKullanıcı: "${text}"\nHangi slotun iso değerini seçti? Sadece iso değerini yaz.`
+        );
+        const slot = slots.find(s => s.iso === picked) ?? slots.find(s => s.label.includes(picked ?? ""));
+        if (!slot) {
+          reply = `Lütfen aşağıdaki saatlerden birini seçin:\n\n${slots.map(s => `⏰ ${s.label}`).join("\n")}`;
+        } else {
+          newCtx.datetime = slot.iso;
+          if (newCtx.customerName) {
+            reply = buildConfirmMsg(newCtx, svc);
+            state = "CONFIRM";
+          } else {
+            reply = "Harika! 😊 Adınızı öğrenebilir miyim?";
+            state = "ASK_NAME";
+          }
+        }
+        break;
+      }
+
+      case "ASK_NAME": {
+        const name = await llmExtract(
+          `Kullanıcı: "${text}"\nBu mesajdaki kişi adını çıkar. Sadece adı yaz (ör: "Uğur", "Ayşe Kaya").`
+        );
+        const finalName = name && name !== "null" ? name : text.trim();
+        newCtx.customerName = finalName;
+        const svc = services.find(s => s.id === newCtx.serviceId)!;
+        reply = buildConfirmMsg(newCtx, svc);
+        state = "CONFIRM";
+        break;
+      }
+
+      case "CONFIRM": {
+        const svc = services.find(s => s.id === newCtx.serviceId)!;
+        const decision = await llmExtract(
+          `Kullanıcı: "${text}"\nRandevu onaylamak için "evet", iptal için "hayır", değişiklik için ne değiştirmek istediğini ("isim", "tarih", "uzman", "hizmet") yaz.`
         );
 
-        messages.push({ role: "assistant", content: response.content });
-
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-        for (const toolUse of toolUseBlocks) {
-          let result = "";
-          const input = toolUse.input as Record<string, string>;
-
-          if (toolUse.name === "get_services") {
-            result = services.map((s) => `${s.emoji} ${s.name} (${s.duration} dk) — ${s.price}₺ [ID: ${s.id}]`).join("\n");
-          } else if (toolUse.name === "get_available_staff") {
-            const svc = services.find((s) => s.id === input.service_id);
-            if (!svc) { result = "Hizmet bulunamadı"; }
-            else {
-              const eligible = svc.staff.map((ss) => ss.staff);
-              result = eligible.map((s) => `${s.name} [ID: ${s.id}]`).join("\n") || "Müsait uzman yok";
-            }
-          } else if (toolUse.name === "get_available_slots") {
-            const st = staff.find((s) => s.id === input.staff_id);
-            const svc = services.find((s) => s.id === input.service_id);
-            if (!st || !svc) { result = "Bulunamadı"; }
-            else {
-              const slots: string[] = [];
-              const now = new Date();
-              const specificDate = input.date ? new Date(input.date) : null;
-              const daysToCheck = specificDate ? 1 : 7;
-
-              for (let d = 0; d < (specificDate ? 1 : 7); d++) {
-                let checkDate: Date;
-                if (specificDate) {
-                  checkDate = new Date(specificDate);
-                } else {
-                  checkDate = new Date(now);
-                  checkDate.setDate(checkDate.getDate() + d + 1);
-                }
-                const dayName = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"][checkDate.getDay()];
-                const wh = st.workingHours.find((h) => h.day === dayName);
-                if (!wh || wh.dayOff || !wh.start) continue;
-                const [sh, sm] = wh.start.split(":").map(Number);
-                const [eh, em] = (wh.end || "18:00").split(":").map(Number);
-                let cur = sh * 60 + sm;
-                const endMin = eh * 60 + em;
-                const dateStr = checkDate.toLocaleDateString("tr-TR", { day: "2-digit", month: "long", timeZone: "UTC" });
-                while (cur + svc.duration <= endMin) {
-                  const h = String(Math.floor(cur / 60)).padStart(2, "0");
-                  const m = String(cur % 60).padStart(2, "0");
-                  slots.push(`${dateStr} ${h}:${m}`);
-                  cur += 30;
-                  if (slots.length >= 8) break;
-                }
-              }
-              void daysToCheck;
-              result = slots.length > 0 ? slots.join("\n") : "Müsait slot bulunamadı";
-            }
-          } else if (toolUse.name === "create_appointment") {
-            console.log("create_appointment input:", JSON.stringify(input));
-            appointmentCreated = true;
-            const svc = services.find((s) => s.id === input.service_id);
-            if (!svc) { result = `Hizmet bulunamadı: service_id=${input.service_id}`; console.error("Service not found:", input.service_id); }
-            else {
-              const appt = await prisma.appointment.create({
-                data: {
-                  customerName: input.customer_name,
-                  customerPhone: phone,
-                  staffId: input.staff_id,
-                  serviceId: input.service_id,
-                  datetime: new Date(input.datetime),
-                  duration: svc.duration,
-                  price: svc.price,
-                  status: "CONFIRMED",
-                },
-                include: { staff: true },
-              });
-              // Notify salon owner
-              await sendWhatsApp(
-                process.env.OWNER_PHONE!,
-                `📅 Yeni randevu!\n👤 ${appt.customerName}\n💅 ${svc.name}\n🕐 ${new Date(appt.datetime).toLocaleString("tr-TR", { timeZone: "UTC" })}\n👩 ${appt.staff.name}`
-              );
-              result = `Randevu oluşturuldu: ${appt.id}`;
-            }
-          }
-
-          toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+        if (decision === "evet" || decision === "yes") {
+          const appt = await prisma.appointment.create({
+            data: {
+              customerName: newCtx.customerName!,
+              customerPhone: phone,
+              staffId: newCtx.staffId!,
+              serviceId: newCtx.serviceId!,
+              datetime: new Date(newCtx.datetime!),
+              duration: svc.duration,
+              price: svc.price,
+              status: "CONFIRMED",
+            },
+            include: { staff: true },
+          });
+          const timeStr = new Date(appt.datetime).toLocaleString("tr-TR", { timeZone: "UTC", day: "2-digit", month: "long", hour: "2-digit", minute: "2-digit" });
+          await sendOwner(`📅 Yeni randevu!\n👤 ${appt.customerName}\n💅 ${svc.name}\n🕐 ${timeStr}\n👩 ${appt.staff.name}`);
+          reply = `✅ Randevunuz oluşturuldu, ${newCtx.customerName}!\n\n${svc.emoji} *${svc.name}*\n📅 ${timeStr}\n👩 *${appt.staff.name}*\n\nSizi bekliyoruz! 🌸`;
+          state = "IDLE";
+          newCtx = { customerName: newCtx.customerName, lastMsgId: msgId };
+        } else if (decision === "hayır" || decision === "no") {
+          reply = "Randevu iptal edildi. Yeni randevu almak ister misiniz?";
+          state = "IDLE";
+          newCtx = { customerName: newCtx.customerName, lastMsgId: msgId };
+        } else if (decision === "isim") {
+          reply = "Adınızı güncelleyelim, yeni adınız nedir?";
+          state = "ASK_NAME";
+        } else if (decision === "tarih") {
+          reply = "Hangi gün ve saat uygun?";
+          state = "ASK_DATETIME";
+        } else if (decision === "uzman") {
+          const eligibleStaff = svc.staff.map(ss => ss.staff);
+          reply = `Uzmanlarımız:\n\n${eligibleStaff.map(s => `👩 *${s.name}*`).join("\n")}\n\nHangisini tercih edersiniz?`;
+          state = "ASK_STAFF";
+        } else if (decision === "hizmet") {
+          reply = buildServiceList(services, newCtx.customerName);
+          state = "ASK_SERVICE";
+          newCtx = { customerName: newCtx.customerName, lastMsgId: msgId };
+        } else {
+          reply = `${buildConfirmMsg(newCtx, svc)}\n\nOnaylıyor musunuz? (evet/hayır)`;
         }
-
-        messages.push({ role: "user", content: toolResults });
-      } else {
-        continueLoop = false;
+        break;
       }
     }
 
-    if (reply) {
-      await sendWhatsApp(phone, reply);
-
-      // Save history (only text exchanges, max 20 items)
-      const newHistory: Anthropic.MessageParam[] = [
-        ...history,
-        { role: "user", content: text },
-        { role: "assistant", content: reply },
-      ].slice(-20);
-
-      await prisma.waConversation.update({
-        where: { phone },
-        data: { state: "ACTIVE", context: { lastMsgId: msgId, history: newHistory } },
-      });
-    }
+    await sendWhatsApp(phone, reply);
+    await prisma.waConversation.update({
+      where: { phone },
+      data: { state, context: newCtx },
+    });
   } catch (err) {
     console.error("Webhook error:", err);
   }
-
   return NextResponse.json({ ok: true });
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function buildServiceList(services: { id: string; name: string; emoji: string; price: { toString(): string }; duration: number }[], name?: string) {
+  const greeting = name ? `Merhaba ${name}! 👋 ` : "Merhaba! 👋 ";
+  const list = services.map(s => `${s.emoji} *${s.name}* — ${s.price}₺ (${s.duration} dk)`).join("\n");
+  return `${greeting}Belle Studio'ya hoş geldiniz! ✨\n\nHizmetlerimiz:\n\n${list}\n\nHangisini almak istersiniz?`;
+}
+
+function buildConfirmMsg(ctx: BookingCtx, svc: { emoji: string; name: string }) {
+  const dt = new Date(ctx.datetime!);
+  const timeStr = dt.toLocaleString("tr-TR", { timeZone: "UTC", day: "2-digit", month: "long", weekday: "long", hour: "2-digit", minute: "2-digit" });
+  return `📋 *Randevu Özeti*\n\n👤 *Ad:* ${ctx.customerName}\n${svc.emoji} *Hizmet:* ${svc.name}\n📅 *Tarih:* ${timeStr}\n👩 *Uzman:* ${ctx.staffName}\n\nOnaylıyor musunuz? (evet/hayır veya değişiklik yapmak istediğinizi belirtin)`;
+}
+
+type SlotItem = { label: string; iso: string; time: string };
+
+function getSlots(st: { workingHours: { day: string; start: string | null; end: string | null; dayOff: boolean }[] }, svc: { duration: number }, dateStr: string): SlotItem[] {
+  const date = new Date(dateStr + "T00:00:00Z");
+  const dayName = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"][date.getUTCDay()];
+  const wh = st.workingHours.find(h => h.day === dayName);
+  if (!wh || wh.dayOff || !wh.start) return [];
+  const [sh, sm] = wh.start.split(":").map(Number);
+  const [eh, em] = (wh.end || "18:00").split(":").map(Number);
+  const slots: SlotItem[] = [];
+  let cur = sh * 60 + sm;
+  const endMin = eh * 60 + em;
+  while (cur + svc.duration <= endMin && slots.length < 10) {
+    const h = String(Math.floor(cur / 60)).padStart(2, "0");
+    const m = String(cur % 60).padStart(2, "0");
+    const label = `${h}:${m}`;
+    const iso = `${dateStr}T${h}:${m}:00+03:00`;
+    slots.push({ label, iso, time: label });
+    cur += 30;
+  }
+  return slots;
+}
+
+async function llmYesNo(prompt: string): Promise<boolean> {
+  const r = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 10,
+    messages: [{ role: "user", content: prompt }],
+  });
+  const text = (r.content[0] as Anthropic.TextBlock).text.toLowerCase().trim();
+  return text.startsWith("evet") || text.startsWith("yes");
+}
+
+async function llmExtract(prompt: string): Promise<string | null> {
+  const r = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 50,
+    messages: [{ role: "user", content: prompt }],
+  });
+  const text = (r.content[0] as Anthropic.TextBlock).text.trim();
+  return text === "null" ? null : text;
+}
+
+async function llmFreeReply(userText: string, name: string | undefined, systemHint: string): Promise<string> {
+  const r = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 200,
+    system: systemHint + (name ? ` Kullanıcının adı: ${name}.` : ""),
+    messages: [{ role: "user", content: userText }],
+  });
+  return (r.content[0] as Anthropic.TextBlock).text.trim();
 }
 
 async function sendWhatsApp(to: string, message: string) {
@@ -287,13 +325,13 @@ async function sendWhatsApp(to: string, message: string) {
         Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body: message },
-      }),
+      body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: message } }),
     }
   );
   if (!res.ok) console.error("WhatsApp send error:", await res.text());
+}
+
+async function sendOwner(message: string) {
+  if (!process.env.OWNER_PHONE) return;
+  await sendWhatsApp(process.env.OWNER_PHONE, message).catch(e => console.error("Owner WA error:", e));
 }
