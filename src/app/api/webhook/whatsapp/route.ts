@@ -132,6 +132,7 @@ Mevcut konuşma durumu: ${conv.state}`;
 
     let reply = "";
     let continueLoop = true;
+    let appointmentCreated = false;
 
     while (continueLoop) {
       const response = await client.messages.create({
@@ -143,10 +144,20 @@ Mevcut konuşma durumu: ${conv.state}`;
       });
 
       if (response.stop_reason === "end_turn") {
-        reply = response.content
+        const candidateReply = response.content
           .filter((b): b is Anthropic.TextBlock => b.type === "text")
           .map((b) => b.text)
           .join("\n");
+
+        // If Claude is confirming a booking without having called create_appointment, force the tool call
+        const looksLikeConfirmation = /randev|oluştur|ayarland|kaydedil|hazır|onaylandı/i.test(candidateReply);
+        if (looksLikeConfirmation && !appointmentCreated) {
+          messages.push({ role: "assistant", content: candidateReply });
+          messages.push({ role: "user", content: "create_appointment tool'unu çağırarak randevuyu sisteme kaydet. Tool çağırmadan randevu oluşturulmuş sayılmaz." });
+          continue;
+        }
+
+        reply = candidateReply;
         continueLoop = false;
       } else if (response.stop_reason === "tool_use") {
         const toolUseBlocks = response.content.filter(
@@ -201,6 +212,7 @@ Mevcut konuşma durumu: ${conv.state}`;
             }
           } else if (toolUse.name === "create_appointment") {
             console.log("create_appointment input:", JSON.stringify(input));
+            appointmentCreated = true;
             const svc = services.find((s) => s.id === input.service_id);
             if (!svc) { result = `Hizmet bulunamadı: service_id=${input.service_id}`; console.error("Service not found:", input.service_id); }
             else {
