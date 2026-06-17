@@ -198,8 +198,9 @@ Mevcut konuşma durumu: ${conv.state}`;
               result = slots.length > 0 ? slots.join("\n") : "Müsait slot bulunamadı";
             }
           } else if (toolUse.name === "create_appointment") {
+            console.log("create_appointment input:", JSON.stringify(input));
             const svc = services.find((s) => s.id === input.service_id);
-            if (!svc) { result = "Hizmet bulunamadı"; }
+            if (!svc) { result = `Hizmet bulunamadı: service_id=${input.service_id}`; console.error("Service not found:", input.service_id); }
             else {
               const appt = await prisma.appointment.create({
                 data: {
